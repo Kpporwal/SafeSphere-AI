@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import { FileCheck, Plus, Download, MapPin, Calendar, AlertCircle } from 'lucide-react';
+
 import { PageHeader } from '@/components/shared/page-header';
 import { StatCard } from '@/components/shared/stat-card';
 import { StatusBadge } from '@/components/shared/status-badge';
@@ -11,7 +12,24 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { useSupabaseQuery } from '@/hooks/use-supabase-query';
-import type { Permit } from '@/types/database';
+import type { Department, Permit, Worker } from '@/types/database';
+import AddPermitDialog from '@/components/permits/AddPermitDialog';
+import PermitDetailsDrawer from '@/components/permits/PermitDetailsDrawer';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
+import { Trash2 } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
+import { useToast } from '@/hooks/use-toast';
+import { useQueryClient } from '@tanstack/react-query';
+import { MapPin as MapPinIcon, Download as DownloadIcon, Calendar as CalendarIcon, AlertCircle as AlertCircleIcon } from 'lucide-react';
 
 const statusOptions = [
   { label: 'Draft', value: 'draft' },
@@ -43,27 +61,58 @@ const typeLabels: Record<string, string> = {
 };
 
 export default function PermitsPage() {
+  const [openAddPermit, setOpenAddPermit] = React.useState(false);
+  const [openEditPermit, setOpenEditPermit] = React.useState(false);
+  const [selectedPermit, setSelectedPermit] = React.useState<Permit | null>(null);
+  // (kept for parity with other modules; current implementation uses PermitDetailsDrawer sheet)
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
+
+
   const [statusFilter, setStatusFilter] = React.useState('all');
   const [typeFilter, setTypeFilter] = React.useState('all');
+  const [deptFilter, setDeptFilter] = React.useState('all');
+
+  const { toast } = useToast();
 
   const { data: permits, isLoading } = useSupabaseQuery<Permit>({
     table: 'permits',
     order: { column: 'created_at', ascending: false },
     limit: 1000,
+    queryKey: ['permits'],
   });
+
+  const { data: departments } = useSupabaseQuery<Department>({
+    table: 'departments',
+    limit: 200,
+    queryKey: ['departments'],
+  });
+
+  const deptMap = React.useMemo(() => {
+    const m = new Map<string, string>();
+    (departments ?? []).forEach((d) => m.set(d.id, d.name));
+    return m;
+  }, [departments]);
 
   const filtered = React.useMemo(() => {
     return (permits ?? []).filter((p) => {
       if (statusFilter !== 'all' && p.status !== statusFilter) return false;
       if (typeFilter !== 'all' && p.type !== typeFilter) return false;
+      const pDept = (p as any).department_id ?? null;
+      if (deptFilter !== 'all' && pDept !== deptFilter) return false;
       return true;
     });
-  }, [permits, statusFilter, typeFilter]);
+  }, [permits, statusFilter, typeFilter, deptFilter]);
 
-  const pendingCount = permits?.filter((p) => p.status === 'pending').length ?? 0;
-  const approvedCount = permits?.filter((p) => p.status === 'approved').length ?? 0;
-  const activeCount = permits?.filter((p) => p.status === 'active').length ?? 0;
-  const expiredCount = permits?.filter((p) => p.status === 'expired').length ?? 0;
+  const pendingCount = filtered.filter((p) => p.status === 'pending').length;
+  const approvedCount = filtered.filter((p) => p.status === 'approved').length;
+  const activeCount = filtered.filter((p) => p.status === 'active').length;
+  const expiredCount = filtered.filter((p) => p.status === 'expired').length;
+
+  const openEditDialog = (permit: Permit) => {
+    setSelectedPermit(permit);
+    setOpenEditPermit(true);
+  };
+
 
   const columns: Column<Permit>[] = [
     {
@@ -145,17 +194,96 @@ export default function PermitsPage() {
 
   return (
     <div className="space-y-6">
+      <AddPermitDialog
+        open={openAddPermit}
+        onOpenChange={setOpenAddPermit}
+        mode="add"
+      />
       <PageHeader
         title="Permits"
         description="Manage work permits and approval workflows"
         icon={<FileCheck className="h-5 w-5 text-primary" />}
         actions={
           <>
-            <Button variant="outline" size="sm">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                try {
+                  const rows = filtered ?? [];
+                  const headers = [
+                    'permit_number',
+                    'title',
+                    'type',
+                    'department',
+                    'worker',
+                    'issued_by',
+                    'start_date',
+                    'expiry_date',
+                    'status',
+                    'description',
+                    'notes',
+                  ];
+
+                  const csvEscape = (v: unknown) => {
+                    const s = v === null || v === undefined ? '' : String(v);
+                    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+                    return s;
+                  };
+
+                  const csv = [
+                    headers.join(','),
+                    ...rows.map((p) => {
+                      const deptName = (p as any).department_id ? deptMap.get((p as any).department_id) ?? '—' : '—';
+                      const workerName = (p as any).worker_id ? (p as any).worker_id : '—';
+                      const notes = (p.precautions ?? []).join('|');
+                      return [
+                        p.permit_number,
+                        p.title,
+                        p.type,
+                        deptName,
+                        workerName,
+                        p.requested_by,
+                        p.start_date,
+                        p.end_date,
+                        p.status,
+                        p.description,
+                        notes,
+                      ]
+                        .map(csvEscape)
+                        .join(',');
+                    }),
+                  ].join('\n');
+
+                  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                  const url = URL.createObjectURL(blob);
+                  const link = document.createElement('a');
+                  link.href = url;
+                  link.download = `permits-${new Date().toISOString().slice(0, 10)}.csv`;
+                  document.body.appendChild(link);
+                  link.click();
+                  link.remove();
+                  URL.revokeObjectURL(url);
+                } catch (err) {
+                  const message = err instanceof Error ? err.message : 'Failed to export CSV.';
+                  toast({
+                    variant: 'destructive',
+                    title: 'Export failed',
+                    description: message,
+                  });
+                }
+              }}
+            >
               <Download className="mr-2 h-4 w-4" />
               Export
             </Button>
-            <Button size="sm">
+            <Button
+              size="sm"
+              onClick={() => {
+                setSelectedPermit(null);
+                setOpenAddPermit(true);
+              }}
+            >
               <Plus className="mr-2 h-4 w-4" />
               New Permit
             </Button>
@@ -216,6 +344,13 @@ export default function PermitsPage() {
                   options={typeOptions}
                   placeholder="All Types"
                   className="w-[160px]"
+                />
+                <FilterSelect
+                  value={deptFilter}
+                  onChange={setDeptFilter}
+                  options={(departments ?? []).map((d) => ({ label: d.name, value: d.id }))}
+                  placeholder="All Departments"
+                  className="w-[180px]"
                 />
               </>
             }

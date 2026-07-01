@@ -1,3 +1,4 @@
+
 'use client';
 
 import * as React from 'react';
@@ -9,16 +10,25 @@ import { DataTable, type Column } from '@/components/shared/data-table';
 import { FilterSelect } from '@/components/shared/filter-select';
 import { Button } from '@/components/ui/button';
 import AddWorkerDialog from "@/components/workers/AddWorkerDialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
+import { Trash2, UserRoundPen } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Separator } from '@/components/ui/separator';
 import { useSupabaseQuery } from '@/hooks/use-supabase-query';
+import { createClient } from '@/lib/supabase/client';
+import { useToast } from '@/hooks/use-toast';
+import { useQueryClient } from '@tanstack/react-query';
 import type { Worker, Department } from '@/types/database';
 
 const statusOptions = [
@@ -66,13 +76,24 @@ export default function WorkersPage() {
   const [deptFilter, setDeptFilter] = React.useState('all');
   const [selectedWorker, setSelectedWorker] = React.useState<Worker | null>(null);
   const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [workerActionLoading, setWorkerActionLoading] = React.useState<string | null>(null);
+  const [openEditWorker, setOpenEditWorker] = React.useState(false);
+
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const resetEdit = React.useCallback(() => {
+    setOpenEditWorker(false);
+    setSelectedWorker(null);
+  }, []);
+
 
   const { data: workers, isLoading } = useSupabaseQuery<Worker>({
+
     table: 'workers',
     limit: 1000,
   });
-  console.log("Workers:", workers);
-console.log("Loading:", isLoading);
+
 
   const { data: departments } = useSupabaseQuery<Department>({
     table: 'departments',
@@ -105,7 +126,84 @@ console.log("Loading:", isLoading);
     setDrawerOpen(true);
   };
 
+  const openEditDialog = (worker: Worker) => {
+    setSelectedWorker(worker);
+    setOpenEditWorker(true);
+  };
+
+
+  const supabase = React.useMemo(() => createClient(), []);
+
+
   const columns: Column<Worker>[] = [
+    {
+      key: 'actions',
+      header: '',
+      cell: (w) => (
+        <div className="flex items-center gap-2 justify-end">
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                disabled={workerActionLoading === `delete-${w.id}` || workerActionLoading !== null}
+                aria-label="Delete worker"
+                onClick={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete worker?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This action cannot be undone. This will permanently delete {w.full_name}.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogCancel disabled={workerActionLoading === `delete-${w.id}`}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={workerActionLoading === `delete-${w.id}` || workerActionLoading !== null}
+                onClick={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const actionKey = `delete-${w.id}`;
+                  setWorkerActionLoading(actionKey);
+                  try {
+                    const { error } = await supabase.from('workers').delete().eq('id', w.id);
+                    if (error) throw error;
+
+                    toast({
+                      title: 'Worker deleted',
+                      description: w.full_name,
+                    });
+
+                    setSelectedWorker(null);
+                    setDrawerOpen(false);
+
+                    queryClient.invalidateQueries({ queryKey: ['workers'] });
+                  } catch (err) {
+                    const message = err instanceof Error ? err.message : 'Failed to delete worker.';
+                    toast({
+                      variant: 'destructive',
+                      title: 'Could not delete worker',
+                      description: message,
+                    });
+                  } finally {
+                    setWorkerActionLoading(null);
+                  }
+                }}
+              >
+                Delete
+              </AlertDialogAction>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
+      ),
+    },
     {
       key: 'name',
       header: 'Worker',
@@ -122,6 +220,7 @@ console.log("Loading:", isLoading);
           </div>
         </div>
       ),
+
     },
     {
       key: 'position',
@@ -193,17 +292,87 @@ console.log("Loading:", isLoading);
         icon={<Users className="h-5 w-5 text-primary" />}
         actions={
           <>
-            <Button variant="outline" size="sm">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={workerActionLoading !== null}
+              onClick={async () => {
+                try {
+                  const rows = filtered ?? [];
+                  const headers = [
+                    'employee_id',
+                    'full_name',
+                    'email',
+                    'phone',
+                    'department',
+                    'position',
+                    'shift',
+                    'status',
+                    'ppe_status',
+                    'location',
+                    'safety_training_expiry',
+                    'ppe_items',
+                  ];
+
+                  const csvEscape = (v: unknown) => {
+                    const s = v === null || v === undefined ? '' : String(v);
+                    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+                    return s;
+                  };
+
+                  const deptName = (id: string | null) => (id ? deptMap.get(id) ?? '—' : '—');
+
+                  const csv = [
+                    headers.join(','),
+                    ...rows.map((w) =>
+                      [
+                        w.employee_id,
+                        w.full_name,
+                        w.email,
+                        w.phone ?? '',
+                        deptName(w.department_id),
+                        w.position,
+                        w.shift,
+                        w.status,
+                        w.ppe_status,
+                        w.location ?? '',
+                        w.safety_training_expiry ?? '',
+                        (w.ppe_items ?? []).join('|'),
+                      ]
+                        .map(csvEscape)
+                        .join(',')
+                    ),
+                  ].join('\n');
+
+                  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                  const url = URL.createObjectURL(blob);
+                  const link = document.createElement('a');
+                  link.href = url;
+                  link.download = `workers-${new Date().toISOString().slice(0, 10)}.csv`;
+                  document.body.appendChild(link);
+                  link.click();
+                  link.remove();
+                  URL.revokeObjectURL(url);
+
+                  toast({ title: 'Export started', description: 'Workers CSV downloaded.' });
+
+                } catch (err) {
+                  const message = err instanceof Error ? err.message : 'Failed to export CSV.';
+                  toast({
+                    variant: 'destructive',
+                    title: 'Export failed',
+                    description: message,
+                  });
+                }
+              }}
+            >
               <Download className="mr-2 h-4 w-4" />
               Export
             </Button>
-            <Button
-  size="sm"
-  onClick={() => setOpenAddWorker(true)}
->
-  <UserPlus className="mr-2 h-4 w-4" />
-  Add Worker
-</Button>
+            <Button size="sm" onClick={() => setOpenAddWorker(true)}>
+              <UserPlus className="mr-2 h-4 w-4" />
+              Add Worker
+            </Button>
           </>
         }
       />
@@ -391,10 +560,29 @@ console.log("Loading:", isLoading);
 
                 {/* Actions */}
                 <div className="flex gap-2">
-                  <Button className="flex-1" size="sm">
+                  <Button
+                    className="flex-1"
+                    size="sm"
+                    onClick={() => {
+                      if (!selectedWorker) return;
+                      openEditDialog(selectedWorker);
+                    }}
+                    disabled={workerActionLoading !== null}
+                  >
+                    <UserRoundPen className="mr-2 h-4 w-4" />
                     Edit Profile
                   </Button>
-                  <Button variant="outline" size="sm">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      toast({
+                        title: 'Schedule feature',
+                        description: 'Scheduling is not implemented yet for workers.',
+                      });
+                    }}
+                    disabled={workerActionLoading !== null}
+                  >
                     <Calendar className="mr-2 h-4 w-4" />
                     Schedule
                   </Button>
@@ -404,10 +592,21 @@ console.log("Loading:", isLoading);
           )}
         </SheetContent>
       </Sheet>
+      <AddWorkerDialog open={openAddWorker} onOpenChange={setOpenAddWorker} />
       <AddWorkerDialog
-  open={openAddWorker}
-  onOpenChange={setOpenAddWorker}
-/>
+        open={openEditWorker}
+        onOpenChange={(next) => {
+          if (!next) resetEdit();
+          else setOpenEditWorker(true);
+        }}
+        mode="edit"
+        initialWorker={selectedWorker}
+        onSubmitted={() => {
+          queryClient.invalidateQueries({ queryKey: ['workers'] });
+          resetEdit();
+        }}
+      />
     </div>
   );
 }
+

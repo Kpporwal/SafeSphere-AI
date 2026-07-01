@@ -206,6 +206,41 @@ export interface Database {
         };
         Update: Partial<Database['public']['Tables']['sensor_data']['Insert']>;
       };
+      sensors: {
+        Row: {
+          id: string;
+          sensor_id: string;
+          sensor_name: string;
+          sensor_type: SensorTypeExtended | SensorTypeExtended | string;
+          location: string;
+          assigned_machine_id: string | null;
+          status: SensorStatus;
+          battery_percent: number;
+          health_score: number;
+          installation_date: string;
+          last_reading: number | null;
+          last_updated: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          sensor_id: string;
+          sensor_name: string;
+          sensor_type: SensorTypeExtended | string;
+          location: string;
+          assigned_machine_id?: string | null;
+          status?: SensorStatus;
+          battery_percent?: number;
+          health_score?: number;
+          installation_date: string;
+          last_reading?: number | null;
+          last_updated?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['sensors']['Insert']>;
+      };
       alerts: {
         Row: {
           id: string;
@@ -373,7 +408,10 @@ export type Department = Database['public']['Tables']['departments']['Row'];
 export type Worker = Database['public']['Tables']['workers']['Row'];
 export type Machine = Database['public']['Tables']['machines']['Row'];
 export type SensorReading = Database['public']['Tables']['sensor_data']['Row'];
+export type Sensor = Database['public']['Tables']['sensors']['Row'];
+
 export type Alert = Database['public']['Tables']['alerts']['Row'];
 export type Permit = Database['public']['Tables']['permits']['Row'];
 export type Incident = Database['public']['Tables']['incidents']['Row'];
 export type Report = Database['public']['Tables']['reports']['Row'];
+

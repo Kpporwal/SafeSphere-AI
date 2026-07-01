@@ -1,310 +1,556 @@
 'use client';
 
 import * as React from 'react';
-import { Radio, Download, Cpu, Activity, Gauge, Thermometer, Wind, Zap, Battery, AlertTriangle } from 'lucide-react';
+import {
+  Cpu,
+  Activity,
+  Download,
+  Radio,
+  Battery,
+  AlertTriangle,
+  Gauge,
+  Search,
+  SlidersHorizontal,
+} from 'lucide-react';
+
 import { PageHeader } from '@/components/shared/page-header';
 import { StatCard } from '@/components/shared/stat-card';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { DataTable, type Column } from '@/components/shared/data-table';
 import { FilterSelect } from '@/components/shared/filter-select';
+import { EmptyState } from '@/components/shared/empty-state';
+
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { useSupabaseQuery } from '@/hooks/use-supabase-query';
-import type { SensorReading, Machine } from '@/types/database';
 
-const statusOptions = [
+import { Sheet } from '@/components/ui/sheet';
+
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
+
+import { Input } from '@/components/ui/input';
+
+import { useSupabaseQuery } from '@/hooks/use-supabase-query';
+import { createClient } from '@/lib/supabase/client';
+import { useToast } from '@/hooks/use-toast';
+import { useQueryClient } from '@tanstack/react-query';
+
+import type { Machine, Sensor, SensorStatus, SensorTypeExtended } from '@/types/database';
+
+import AddSensorDialog from '@/components/sensors/AddSensorDialog';
+import SensorDetailsDrawer from '@/components/sensors/SensorDetailsDrawer';
+import { Clock, RefreshCw } from 'lucide-react';
+
+const statusOptions: Array<{ label: string; value: SensorStatus }> = [
   { label: 'Online', value: 'online' },
   { label: 'Warning', value: 'warning' },
   { label: 'Critical', value: 'critical' },
   { label: 'Offline', value: 'offline' },
 ];
 
-const typeOptions = [
+const sensorTypeOptions: Array<{ label: string; value: SensorTypeExtended }> = [
   { label: 'Gas', value: 'gas' },
   { label: 'Temperature', value: 'temperature' },
-  { label: 'Pressure', value: 'pressure' },
   { label: 'Humidity', value: 'humidity' },
+  { label: 'Pressure', value: 'pressure' },
   { label: 'Smoke', value: 'smoke' },
   { label: 'Voltage', value: 'voltage' },
   { label: 'Battery', value: 'battery' },
+  { label: 'Noise', value: 'noise' },
+  { label: 'Vibration', value: 'vibration' },
+  { label: 'Air Quality', value: 'air_quality' },
+  { label: 'Wearable', value: 'wearable' },
 ];
 
-const sensorTypeConfig: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
-  gas: { icon: <Wind className="h-5 w-5" />, color: 'text-chart-5', label: 'Gas' },
-  temperature: { icon: <Thermometer className="h-5 w-5" />, color: 'text-warning', label: 'Temperature' },
-  pressure: { icon: <Gauge className="h-5 w-5" />, color: 'text-primary', label: 'Pressure' },
-  humidity: { icon: <Wind className="h-5 w-5" />, color: 'text-chart-4', label: 'Humidity' },
-  smoke: { icon: <Zap className="h-5 w-5" />, color: 'text-destructive', label: 'Smoke' },
-  voltage: { icon: <Zap className="h-5 w-5" />, color: 'text-chart-3', label: 'Voltage' },
-  battery: { icon: <Battery className="h-5 w-5" />, color: 'text-success', label: 'Battery' },
-};
+type BatteryFilter = 'all' | 'low' | 'medium' | 'high';
 
-const statusGlow: Record<string, string> = {
-  online: 'shadow-[0_0_12px_hsl(var(--success)/0.4)]',
-  warning: 'shadow-[0_0_12px_hsl(var(--warning)/0.4)]',
-  critical: 'shadow-[0_0_12px_hsl(var(--destructive)/0.4)]',
-  offline: '',
-};
+function batteryLabel(v: BatteryFilter) {
+  if (v === 'low') return 'Low (<20%)';
+  if (v === 'medium') return 'Medium (20-50%)';
+  if (v === 'high') return 'High (>50%)';
+  return 'All Batteries';
+}
+
+function batteryBucket(percent: number) {
+  if (percent < 20) return 'low';
+  if (percent < 50) return 'medium';
+  return 'high';
+}
+
+function csvEscape(v: unknown) {
+  const s = v === null || v === undefined ? '' : String(v);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
 
 export default function SensorsPage() {
-  const [statusFilter, setStatusFilter] = React.useState('all');
-  const [typeFilter, setTypeFilter] = React.useState('all');
+  const [statusFilter, setStatusFilter] = React.useState<'all' | SensorStatus>('all');
+  const [typeFilter, setTypeFilter] = React.useState<'all' | SensorTypeExtended>('all');
+  const [batteryFilter, setBatteryFilter] = React.useState<BatteryFilter>('all');
+  const [searchTerm, setSearchTerm] = React.useState('');
 
-  const { data: sensors, isLoading } = useSupabaseQuery<SensorReading>({
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [selectedSensor, setSelectedSensor] = React.useState<Sensor | null>(null);
+  const [sensorActionLoading, setSensorActionLoading] = React.useState<string | null>(null);
+
+  const [openAddSensor, setOpenAddSensor] = React.useState(false);
+  const [openEditSensor, setOpenEditSensor] = React.useState(false);
+
+  const supabase = React.useMemo(() => createClient(), []);
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+
+  const { data: machines } = useSupabaseQuery<Machine>({ table: 'machines', limit: 1000 });
+
+  const { data: sensors, isLoading } = useSupabaseQuery<Sensor>({
+    table: 'sensors',
+    limit: 1000,
+    order: { column: 'last_updated', ascending: false },
+    queryKey: ['sensors', 'list'],
+  });
+
+  // Fetch latest readings for live table columns (optional/robust):
+  // In this app architecture we show sensors master row fields, but ensure last_reading is fresh enough.
+  const { data: readings } = useSupabaseQuery<any>({
     table: 'sensor_data',
+    limit: 2000,
     order: { column: 'recorded_at', ascending: false },
-    limit: 1000,
-  });
-  const { data: machines } = useSupabaseQuery<Machine>({
-    table: 'machines',
-    limit: 1000,
+    queryKey: ['sensor_data', 'latest'],
   });
 
-  const machineMap = React.useMemo(() => {
-    const m = new Map<string, string>();
-    machines?.forEach((mac) => m.set(mac.id, mac.name));
-    return m;
-  }, [machines]);
-
-  const filtered = React.useMemo(() => {
-    return (sensors ?? []).filter((s) => {
-      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
-      if (typeFilter !== 'all' && s.sensor_type !== typeFilter) return false;
-      return true;
-    });
-  }, [sensors, statusFilter, typeFilter]);
-
-  const onlineCount = sensors?.filter((s) => s.status === 'online').length ?? 0;
-  const warningCount = sensors?.filter((s) => s.status === 'warning').length ?? 0;
-  const criticalCount = sensors?.filter((s) => s.status === 'critical').length ?? 0;
-  const offlineCount = sensors?.filter((s) => s.status === 'offline').length ?? 0;
-
-  // Get latest reading per sensor for cards
-  const sensorCards = React.useMemo(() => {
-    const seen = new Set<string>();
-    const result: SensorReading[] = [];
-    (sensors ?? []).forEach((s) => {
-      if (!seen.has(s.sensor_id)) {
-        seen.add(s.sensor_id);
-        result.push(s);
+  const latestBySensorId = React.useMemo(() => {
+    const m = new Map<string, { last_reading: number; unit?: string; recorded_at?: string; status?: SensorStatus }>();
+    (readings ?? []).forEach((r) => {
+      const sid = r.sensor_id as string;
+      if (!m.has(sid)) {
+        m.set(sid, {
+          last_reading: Number(r.reading_value),
+          unit: r.unit as string,
+          recorded_at: r.recorded_at as string,
+          status: r.status as SensorStatus,
+        });
       }
     });
-    return result.slice(0, 8);
-  }, [sensors]);
+    return m;
+  }, [readings]);
 
-  const columns: Column<SensorReading>[] = [
+  const machineMap = React.useMemo(() => {
+    const map = new Map<string, Machine>();
+    (machines ?? []).forEach((m) => map.set(m.id, m));
+    return map;
+  }, [machines]);
+
+  const filteredSensors = React.useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    return (sensors ?? []).filter((s) => {
+      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+      if (typeFilter !== 'all' && (s.sensor_type as SensorTypeExtended) !== typeFilter) return false;
+      if (batteryFilter !== 'all') {
+        const bucket = batteryBucket(Number(s.battery_percent));
+        if (bucket !== batteryFilter) return false;
+      }
+      if (q) {
+        const hay = `${s.sensor_name} ${s.sensor_id}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [sensors, statusFilter, typeFilter, batteryFilter, searchTerm]);
+
+  // Statistics cards (update with current filtered set, like Workers/Machines)
+  const totalSensors = filteredSensors.length;
+  const activeSensors = filteredSensors.filter((s) => s.status === 'online').length;
+  const offlineSensors = filteredSensors.filter((s) => s.status === 'offline').length;
+  const lowBatterySensors = filteredSensors.filter((s) => Number(s.battery_percent) < 20).length;
+
+  const sensorRows = React.useMemo(() => {
+    // Merge latest reading info into sensor rows (without changing stored sensor master data)
+    return filteredSensors.map((s) => {
+      const latest = latestBySensorId.get(s.sensor_id);
+      if (!latest) return s;
+      const merged: Sensor = {
+        ...s,
+        last_reading: latest.last_reading ?? s.last_reading,
+        last_updated: latest.recorded_at ? new Date(latest.recorded_at).toISOString() : s.last_updated,
+        status: latest.status ?? s.status,
+      };
+      return merged;
+    });
+  }, [filteredSensors, latestBySensorId]);
+
+  const columns: Column<Sensor>[] = [
     {
-      key: 'sensor_id',
-      header: 'Sensor ID',
+      key: 'sensor_name',
+      header: 'Sensor',
       sortable: true,
-      sortAccessor: (s) => s.sensor_id,
+      sortAccessor: (s) => s.sensor_name,
       cell: (s) => (
-        <div className="flex items-center gap-2">
-          <Radio className="h-4 w-4 text-primary" />
-          <span className="text-sm font-medium font-mono">{s.sensor_id}</span>
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 border border-primary/20">
+            <Cpu className="h-4 w-4 text-primary" />
+          </div>
+          <div>
+            <p className="text-sm font-medium">{s.sensor_name}</p>
+            <p className="text-xs text-muted-foreground font-mono">{s.sensor_id}</p>
+          </div>
         </div>
       ),
     },
     {
-      key: 'type',
+      key: 'sensor_type',
       header: 'Type',
+      cell: (s) => <span className="text-sm">{s.sensor_type}</span>,
+    },
+    {
+      key: 'assigned_machine_id',
+      header: 'Machine',
+      cell: (s) => (
+        <span className="text-sm text-muted-foreground">{s.assigned_machine_id ? machineMap.get(s.assigned_machine_id)?.name ?? '—' : '—'}</span>
+      ),
+    },
+    {
+      key: 'location',
+      header: 'Location',
+      cell: (s) => <span className="text-sm text-muted-foreground">{s.location}</span>,
+    },
+    {
+      key: 'battery_percent',
+      header: 'Battery %',
+      sortable: true,
+      sortAccessor: (s) => s.battery_percent,
       cell: (s) => {
-        const config = sensorTypeConfig[s.sensor_type] ?? sensorTypeConfig.temperature;
+        const batt = Number(s.battery_percent);
+        const tone = batt < 20 ? 'text-destructive' : batt < 50 ? 'text-warning' : 'text-success';
         return (
-          <Badge variant="outline" className={`text-xs ${config.color}`}>
-            {config.icon}
-            <span className="ml-1">{config.label}</span>
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Battery className={`h-4 w-4 ${tone}`} />
+            <span className={`text-sm font-mono ${tone}`}>{batt}%</span>
+          </div>
         );
       },
     },
     {
-      key: 'machine',
-      header: 'Machine',
-      cell: (s) => (
-        <span className="text-sm text-muted-foreground">
-          {s.machine_id ? (machineMap.get(s.machine_id) ?? '—') : '—'}
-        </span>
-      ),
-    },
-    {
-      key: 'reading',
-      header: 'Reading',
+      key: 'last_reading',
+      header: 'Last Reading',
       sortable: true,
-      sortAccessor: (s) => Number(s.reading_value),
+      sortAccessor: (s) => s.last_reading ?? 0,
       cell: (s) => (
         <div className="flex items-center gap-2">
           <Gauge className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-medium font-mono">
-            {Number(s.reading_value).toFixed(2)} {s.unit}
-          </span>
+          <span className="text-sm font-mono">{s.last_reading ?? '—'}</span>
         </div>
       ),
     },
     {
       key: 'status',
       header: 'Status',
+      cell: (s) => <StatusBadge status={s.status} />,
+    },
+    {
+      key: 'last_updated',
+      header: 'Last Updated',
+      sortable: true,
+      sortAccessor: (s) => s.last_updated ?? '',
       cell: (s) => (
-        <div className="flex items-center gap-2">
-          {s.status === 'online' && (
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
-            </span>
-          )}
-          {s.status === 'warning' && (
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warning opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-warning" />
-            </span>
-          )}
-          {s.status === 'critical' && (
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-destructive opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-destructive" />
-            </span>
-          )}
-          {s.status === 'offline' && <span className="h-2 w-2 rounded-full bg-muted-foreground" />}
-          <StatusBadge status={s.status} />
-        </div>
+        <span className="text-sm text-muted-foreground">{s.last_updated ? new Date(s.last_updated).toLocaleString() : '—'}</span>
       ),
     },
     {
-      key: 'recorded_at',
-      header: 'Recorded At',
-      sortable: true,
-      sortAccessor: (s) => s.recorded_at,
+      key: 'actions',
+      header: '',
       cell: (s) => (
-        <span className="text-sm text-muted-foreground">
-          {new Date(s.recorded_at).toLocaleString()}
-        </span>
+        <div className="flex items-center gap-2 justify-end" onClick={(e) => e.stopPropagation()}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            aria-label="Edit sensor"
+            disabled={sensorActionLoading !== null}
+            onClick={() => {
+              setSelectedSensor(s);
+              setOpenEditSensor(true);
+            }}
+          >
+            <span className="text-xs">✎</span>
+          </Button>
+
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                aria-label="Delete sensor"
+                disabled={sensorActionLoading !== null}
+              >
+                <span className="text-xs">🗑</span>
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete sensor?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This action cannot be undone. This will permanently delete {s.sensor_name}.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogCancel disabled={sensorActionLoading === `delete-${s.id}`}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={sensorActionLoading === `delete-${s.id}` || sensorActionLoading !== null}
+                onClick={async (e) => {
+                  e.preventDefault();
+                  const actionKey = `delete-${s.id}`;
+                  setSensorActionLoading(actionKey);
+                  try {
+                    const { error } = await supabase.from('sensors').delete().eq('id', s.id);
+                    if (error) throw error;
+
+                    toast({ title: 'Sensor deleted', description: s.sensor_name });
+                    setDrawerOpen(false);
+                    setSelectedSensor(null);
+                    queryClient.invalidateQueries({ queryKey: ['sensors'] });
+                  } catch (err) {
+                    const message = err instanceof Error ? err.message : 'Failed to delete sensor.';
+                    toast({ variant: 'destructive', title: 'Could not delete sensor', description: message });
+                  } finally {
+                    setSensorActionLoading(null);
+                  }
+                }}
+              >
+                Delete
+              </AlertDialogAction>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
       ),
     },
   ];
+
+  const handleExport = React.useCallback(() => {
+    try {
+      const rows = sensorRows;
+      const headers = [
+        'sensor_id',
+        'sensor_name',
+        'sensor_type',
+        'location',
+        'assigned_machine_id',
+        'status',
+        'battery_percent',
+        'last_reading',
+        'installation_date',
+        'last_updated',
+      ];
+
+      const csv = [
+        headers.join(','),
+        ...rows.map((s) =>
+          [
+            s.sensor_id,
+            s.sensor_name,
+            s.sensor_type,
+            s.location,
+            s.assigned_machine_id ?? '',
+            s.status,
+            s.battery_percent,
+            s.last_reading ?? '',
+            s.installation_date,
+            s.last_updated ?? '',
+          ]
+            .map(csvEscape)
+            .join(',')
+        ),
+      ].join('\n');
+
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `sensors-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+
+      toast({ title: 'Export started', description: 'Sensors CSV downloaded.' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to export CSV.';
+      toast({ variant: 'destructive', title: 'Export failed', description: message });
+    }
+  }, [sensorRows, toast]);
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Sensors"
-        description="Real-time sensor monitoring and readings"
+        description="Manage sensors, live readings, and device health"
         icon={<Radio className="h-5 w-5 text-primary" />}
         actions={
-          <Button variant="outline" size="sm">
-            <Download className="mr-2 h-4 w-4" />
-            Export
-          </Button>
+          <>
+            <Button variant="outline" size="sm" disabled={isLoading} onClick={handleExport}>
+              <Download className="mr-2 h-4 w-4" />
+              Export
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                setOpenAddSensor(true);
+                setOpenEditSensor(false);
+              }}
+              disabled={isLoading}
+            >
+              <span className="mr-2">＋</span>
+              Add Sensor
+            </Button>
+          </>
         }
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          title="Online Sensors"
-          value={onlineCount}
-          icon={<Activity className="h-5 w-5" />}
-          accent="success"
-        />
-        <StatCard
-          title="Warning"
-          value={warningCount}
-          icon={<AlertTriangle className="h-5 w-5" />}
-          accent="warning"
-        />
-        <StatCard
-          title="Critical"
-          value={criticalCount}
-          icon={<AlertTriangle className="h-5 w-5" />}
-          accent="destructive"
-        />
-        <StatCard
-          title="Offline"
-          value={offlineCount}
-          icon={<Cpu className="h-5 w-5" />}
-          accent="primary"
-        />
+        <StatCard title="Total Sensors" value={totalSensors} icon={<Cpu className="h-5 w-5" />} accent="primary" />
+        <StatCard title="Active Sensors" value={activeSensors} icon={<Activity className="h-5 w-5" />} accent="success" />
+        <StatCard title="Offline Sensors" value={offlineSensors} icon={<AlertTriangle className="h-5 w-5" />} accent="destructive" />
+        <StatCard title="Low Battery Sensors" value={lowBatterySensors} icon={<Battery className="h-5 w-5" />} accent="warning" />
       </div>
-
-      {/* Sensor Cards */}
-      {!isLoading && sensorCards.length > 0 && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {sensorCards.map((sensor) => {
-            const config = sensorTypeConfig[sensor.sensor_type] ?? sensorTypeConfig.temperature;
-            const statusColor = sensor.status === 'online' ? 'text-success' : sensor.status === 'warning' ? 'text-warning' : sensor.status === 'critical' ? 'text-destructive' : 'text-muted-foreground';
-            return (
-              <Card key={sensor.id} className={`glass-panel border-border/50 hover:border-border transition-all ${statusGlow[sensor.status] ?? ''}`}>
-                <CardContent className="p-5">
-                  <div className="flex items-start justify-between mb-3">
-                    <div className={`flex h-10 w-10 items-center justify-center rounded-xl bg-muted/30 border border-border/50 ${config.color}`}>
-                      {config.icon}
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      {sensor.status === 'online' && (
-                        <span className="relative flex h-2 w-2">
-                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75" />
-                          <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
-                        </span>
-                      )}
-                      {sensor.status === 'warning' && (
-                        <span className="relative flex h-2 w-2">
-                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-warning opacity-75" />
-                          <span className="relative inline-flex h-2 w-2 rounded-full bg-warning" />
-                        </span>
-                      )}
-                      {sensor.status === 'critical' && (
-                        <span className="relative flex h-2 w-2">
-                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-destructive opacity-75" />
-                          <span className="relative inline-flex h-2 w-2 rounded-full bg-destructive" />
-                        </span>
-                      )}
-                      {sensor.status === 'offline' && <span className="h-2 w-2 rounded-full bg-muted-foreground" />}
-                      <span className={`text-xs font-medium ${statusColor}`}>{sensor.status}</span>
-                    </div>
-                  </div>
-                  <p className="text-xs text-muted-foreground font-mono mb-1">{sensor.sensor_id}</p>
-                  <p className="text-2xl font-bold tracking-tight">
-                    {Number(sensor.reading_value).toFixed(1)}
-                    <span className="text-sm text-muted-foreground ml-1">{sensor.unit}</span>
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-1">{config.label}</p>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-      )}
 
       <Card className="glass-panel border-border/50">
         <CardContent className="p-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <FilterSelect
+                value={statusFilter}
+                onChange={(v) => setStatusFilter(v as any)}
+                options={statusOptions as any}
+                placeholder="All Statuses"
+                className="w-[130px]"
+              />
+
+              <FilterSelect
+                value={typeFilter}
+                onChange={(v) => setTypeFilter(v as any)}
+                options={sensorTypeOptions as any}
+                placeholder="All Types"
+                className="w-[160px]"
+              />
+
+              <FilterSelect
+                value={batteryFilter}
+                onChange={(v) => setBatteryFilter(v as BatteryFilter)}
+                options={[
+                  { label: batteryLabel('all'), value: 'all' },
+                  { label: batteryLabel('low'), value: 'low' },
+                  { label: batteryLabel('medium'), value: 'medium' },
+                  { label: batteryLabel('high'), value: 'high' },
+                ]}
+                placeholder="Battery Level"
+                className="w-[170px]"
+              />
+            </div>
+
+            <div className="relative w-full sm:max-w-xs">
+              <Input
+                placeholder="Search by sensor name or ID..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="pl-9 bg-muted/30"
+              />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            </div>
+          </div>
+
           <DataTable
             columns={columns}
-            data={filtered}
+            data={sensorRows}
             loading={isLoading}
-            searchPlaceholder="Search sensors by ID..."
-            searchAccessor={(s) => s.sensor_id}
+            searchPlaceholder=""
             getRowId={(s) => s.id}
             emptyTitle="No sensors found"
-            emptyDescription="Try adjusting your filters or search query."
+            emptyDescription="Try adjusting filters or search." 
+            onRowClick={(s) => {
+              setSelectedSensor(s);
+              setDrawerOpen(true);
+            }}
             toolbar={
-              <div className="flex flex-wrap items-center gap-2">
-                <FilterSelect
-                  value={statusFilter}
-                  onChange={setStatusFilter}
-                  options={statusOptions}
-                  placeholder="All Statuses"
-                  className="w-[130px]"
-                />
-                <FilterSelect
-                  value={typeFilter}
-                  onChange={setTypeFilter}
-                  options={typeOptions}
-                  placeholder="All Types"
-                  className="w-[140px]"
-                />
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={isLoading}
+                  onClick={() => {
+                    queryClient.invalidateQueries({ queryKey: ['sensors'] });
+                    queryClient.invalidateQueries({ queryKey: ['sensor_data'] });
+                    toast({ title: 'Refreshing', description: 'Updating sensor list...' });
+                  }}
+                >
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Refresh
+                </Button>
               </div>
             }
           />
         </CardContent>
       </Card>
+
+      <SensorDetailsDrawer
+        open={drawerOpen}
+        onOpenChange={(next) => {
+          setDrawerOpen(next);
+          if (!next) setSelectedSensor(null);
+        }}
+        sensor={
+          selectedSensor
+            ? {
+                ...selectedSensor,
+                assigned_machine_id: selectedSensor.assigned_machine_id,
+              }
+            : null
+        }
+        machines={machines}
+        onEdit={() => {
+          if (!selectedSensor) return;
+          setDrawerOpen(false);
+          setOpenEditSensor(true);
+        }}
+        onViewHistory={() => {
+          toast({ title: 'Sensor history', description: 'History view is not implemented in this module yet.' });
+        }}
+      />
+
+      <AddSensorDialog
+        open={openAddSensor}
+        onOpenChange={(next) => setOpenAddSensor(next)}
+        mode="add"
+        initialSensor={null}
+      />
+
+      <AddSensorDialog
+        open={openEditSensor}
+        onOpenChange={(next) => {
+          setOpenEditSensor(next);
+          if (!next) {
+            setSelectedSensor(null);
+          }
+        }}
+        mode="edit"
+        initialSensor={selectedSensor}
+        onSubmitted={() => {
+          queryClient.invalidateQueries({ queryKey: ['sensors'] });
+          queryClient.invalidateQueries({ queryKey: ['sensor_data'] });
+          setOpenEditSensor(false);
+        }}
+      />
     </div>
   );
 }
+

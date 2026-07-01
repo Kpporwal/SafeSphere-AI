@@ -10,6 +10,11 @@ import { FilterSelect } from '@/components/shared/filter-select';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+
+import AddIncidentDialog from '@/components/incidents/AddIncidentDialog';
+import IncidentDetailsDrawer from '@/components/incidents/IncidentDetailsDrawer';
+
+
 import {
   Sheet,
   SheetContent,
@@ -39,6 +44,9 @@ export default function IncidentsPage() {
   const [severityFilter, setSeverityFilter] = React.useState('all');
   const [selectedIncident, setSelectedIncident] = React.useState<Incident | null>(null);
   const [drawerOpen, setDrawerOpen] = React.useState(false);
+
+  const [addOpen, setAddOpen] = React.useState(false);
+
 
   const { data: incidents, isLoading } = useSupabaseQuery<Incident>({
     table: 'incidents',
@@ -206,14 +214,94 @@ export default function IncidentsPage() {
         icon={<AlertTriangle className="h-5 w-5 text-primary" />}
         actions={
           <>
-            <Button variant="outline" size="sm">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                try {
+                  const rows = filtered ?? [];
+                  const headers = [
+                    'incident_number',
+                    'title',
+                    'description',
+                    'severity',
+                    'status',
+                    'category',
+                    'department',
+                    'worker',
+                    'machine',
+                    'sensor',
+                    'occurred_at',
+                    'reported_by',
+                    'location',
+                    'root_cause',
+                    'corrective_action',
+                    'notes',
+                  ];
+
+                  const csvEscape = (v: unknown) => {
+                    const s = v === null || v === undefined ? '' : String(v);
+                    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+                    return s;
+                  };
+
+                  const csv = [
+                    headers.join(','),
+                    ...rows.map((i) => {
+                      const anyI = i as any;
+                      const corrective = (anyI.corrective_actions ?? [])
+                        .join('|');
+                      return [
+                        anyI.incident_number,
+                        anyI.title,
+                        anyI.description,
+                        anyI.severity,
+                        anyI.status,
+                        anyI.category ?? '',
+                        anyI.department_id ?? '',
+                        anyI.worker_id ?? '',
+                        anyI.machine_id ?? '',
+                        anyI.sensor_id ?? '',
+                        anyI.occurred_at,
+                        anyI.reported_by ?? '',
+                        anyI.location,
+                        anyI.root_cause ?? '',
+                        corrective,
+                        anyI.notes ?? '',
+                      ]
+                        .map(csvEscape)
+                        .join(',');
+                    }),
+                  ].join('\n');
+
+                  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                  const url = URL.createObjectURL(blob);
+                  const link = document.createElement('a');
+                  link.href = url;
+                  link.download = `incidents-${new Date().toISOString().slice(0, 10)}.csv`;
+                  document.body.appendChild(link);
+                  link.click();
+                  link.remove();
+                  URL.revokeObjectURL(url);
+                } catch {
+                  // keep UI unchanged; toasts live in dialog modules in this page
+                }
+              }}
+            >
               <Download className="mr-2 h-4 w-4" />
               Export
             </Button>
-            <Button size="sm">
+            <Button
+              size="sm"
+              onClick={() => {
+                setSelectedIncident(null);
+                setAddOpen(true);
+              }}
+            >
               <Plus className="mr-2 h-4 w-4" />
               Report Incident
             </Button>
+
           </>
         }
       />
@@ -279,8 +367,28 @@ export default function IncidentsPage() {
         </CardContent>
       </Card>
 
+      <IncidentDetailsDrawer
+        open={drawerOpen}
+        onOpenChange={(next) => {
+          setDrawerOpen(next);
+          if (!next) setSelectedIncident(null);
+        }}
+        incident={selectedIncident}
+        profiles={profiles}
+        onEdit={() => {
+          // Edit dialog not wired yet in this page; keep behavior unchanged for now.
+        }}
+      />
+
+      <AddIncidentDialog
+        open={addOpen}
+        onOpenChange={(next) => setAddOpen(next)}
+        mode="add"
+        initialIncident={null}
+      />
       {/* Incident Details Drawer with Timeline */}
       <Sheet open={drawerOpen} onOpenChange={setDrawerOpen}>
+
         <SheetContent className="w-full sm:max-w-lg overflow-y-auto">
           {selectedIncident && (
             <>

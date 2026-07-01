@@ -12,6 +12,22 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { useSupabaseQuery } from '@/hooks/use-supabase-query';
 import type { Machine, Department } from '@/types/database';
+import { createClient } from '@/lib/supabase/client';
+import { useToast } from '@/hooks/use-toast';
+import { useQueryClient } from '@tanstack/react-query';
+import { Edit2, Trash2 } from 'lucide-react';
+import AddMachineDialog from '@/components/machines/AddMachineDialog';
+import MachineDetailsDrawer from '@/components/machines/MachineDetailsDrawer';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 
 const statusOptions = [
   { label: 'Operational', value: 'operational' },
@@ -37,6 +53,17 @@ function getHealthBarColor(score: number): string {
 export default function MachinesPage() {
   const [statusFilter, setStatusFilter] = React.useState('all');
   const [typeFilter, setTypeFilter] = React.useState('all');
+
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [selectedMachine, setSelectedMachine] = React.useState<Machine | null>(null);
+
+  const [addOpen, setAddOpen] = React.useState(false);
+  const [editOpen, setEditOpen] = React.useState(false);
+  const [machineActionLoading, setMachineActionLoading] = React.useState<string | null>(null);
+
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const supabase = React.useMemo(() => createClient(), []);
 
   const { data: machines, isLoading } = useSupabaseQuery<Machine>({
     table: 'machines',
@@ -74,6 +101,82 @@ export default function MachinesPage() {
     : 0;
 
   const columns: Column<Machine>[] = [
+    {
+      key: 'actions',
+      header: '',
+      cell: (m) => (
+        <div className="flex items-center gap-2 justify-end">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            disabled={machineActionLoading === `delete-${m.id}` || machineActionLoading !== null}
+            aria-label="Edit machine"
+            onClick={(e) => {
+              e.stopPropagation();
+              setSelectedMachine(m);
+              setEditOpen(true);
+            }}
+          >
+            <Edit2 className="h-4 w-4" />
+          </Button>
+
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                disabled={machineActionLoading === `delete-${m.id}` || machineActionLoading !== null}
+                aria-label="Delete machine"
+                onClick={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete machine?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This action cannot be undone. This will permanently delete {m.name}.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogCancel disabled={machineActionLoading === `delete-${m.id}`}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={machineActionLoading === `delete-${m.id}` || machineActionLoading !== null}
+                onClick={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const actionKey = `delete-${m.id}`;
+                  setMachineActionLoading(actionKey);
+                  try {
+                    const { error } = await supabase.from('machines').delete().eq('id', m.id);
+                    if (error) throw error;
+
+                    toast({ title: 'Machine deleted', description: m.name });
+                    setSelectedMachine(null);
+                    setDrawerOpen(false);
+                    queryClient.invalidateQueries({ queryKey: ['machines'] });
+                    setEditOpen(false);
+                  } catch (err) {
+                    const message = err instanceof Error ? err.message : 'Failed to delete machine.';
+                    toast({ variant: 'destructive', title: 'Could not delete machine', description: message });
+                  } finally {
+                    setMachineActionLoading(null);
+                  }
+                }}
+              >
+                Delete
+              </AlertDialogAction>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
+      ),
+    },
     {
       key: 'name',
       header: 'Machine',
@@ -179,11 +282,81 @@ export default function MachinesPage() {
         icon={<Cpu className="h-5 w-5 text-primary" />}
         actions={
           <>
-            <Button variant="outline" size="sm">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isLoading}
+              onClick={() => {
+                try {
+                  const rows = filtered ?? [];
+                  const headers = [
+                    'name',
+                    'code',
+                    'type',
+                    'location',
+                    'department',
+                    'status',
+                    'health_score',
+                    'manufacturer',
+                    'model',
+                    'install_date',
+                    'last_maintenance',
+                    'next_maintenance',
+                    'operating_hours',
+                  ];
+
+                  const csvEscape = (v: unknown) => {
+                    const s = v === null || v === undefined ? '' : String(v);
+                    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+                    return s;
+                  };
+
+                  const deptName = (id: string | null) => (id ? deptMap.get(id) ?? '—' : '—');
+
+                  const csv = [
+                    headers.join(','),
+                    ...rows.map((m) =>
+                      [
+                        m.name,
+                        m.code,
+                        m.type,
+                        m.location,
+                        deptName(m.department_id),
+                        m.status,
+                        m.health_score,
+                        m.manufacturer ?? '',
+                        m.model ?? '',
+                        m.install_date,
+                        m.last_maintenance ?? '',
+                        m.next_maintenance ?? '',
+                        m.operating_hours,
+                      ]
+                        .map(csvEscape)
+                        .join(',')
+                    ),
+                  ].join('\n');
+
+                  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                  const url = URL.createObjectURL(blob);
+                  const link = document.createElement('a');
+                  link.href = url;
+                  link.download = `machines-${new Date().toISOString().slice(0, 10)}.csv`;
+                  document.body.appendChild(link);
+                  link.click();
+                  link.remove();
+                  URL.revokeObjectURL(url);
+
+                  toast({ title: 'Export started', description: 'Machines CSV downloaded.' });
+                } catch (err) {
+                  const message = err instanceof Error ? err.message : 'Failed to export CSV.';
+                  toast({ variant: 'destructive', title: 'Export failed', description: message });
+                }
+              }}
+            >
               <Download className="mr-2 h-4 w-4" />
               Export
             </Button>
-            <Button size="sm">
+            <Button size="sm" onClick={() => { setAddOpen(true); setEditOpen(false); }} disabled={isLoading}>
               <Plus className="mr-2 h-4 w-4" />
               Add Machine
             </Button>
@@ -226,6 +399,10 @@ export default function MachinesPage() {
             loading={isLoading}
             searchPlaceholder="Search machines by name or code..."
             searchAccessor={(m) => `${m.name} ${m.code} ${m.type} ${m.manufacturer ?? ''}`}
+            onRowClick={(m) => {
+              setSelectedMachine(m);
+              setDrawerOpen(true);
+            }}
             getRowId={(m) => m.id}
             emptyTitle="No machines found"
             emptyDescription="Try adjusting your filters or search query."
@@ -250,6 +427,47 @@ export default function MachinesPage() {
           />
         </CardContent>
       </Card>
+
+      {/* Machine Details Drawer */}
+      <MachineDetailsDrawer
+        open={drawerOpen}
+        onOpenChange={(next) => {
+          setDrawerOpen(next);
+          if (!next) {
+            setSelectedMachine(null);
+            setEditOpen(false);
+          }
+        }}
+        machine={selectedMachine}
+        departments={departments}
+        onEdit={() => {
+          if (!selectedMachine) return;
+          setEditOpen(true);
+        }}
+      />
+
+      {/* Add Machine */}
+      <AddMachineDialog
+        open={addOpen}
+        onOpenChange={(next) => {
+          setAddOpen(next);
+        }}
+        mode="add"
+        initialMachine={null}
+      />
+
+      {/* Edit Machine */}
+      <AddMachineDialog
+        open={editOpen}
+        onOpenChange={(next) => {
+          setEditOpen(next);
+          if (!next) {
+            setSelectedMachine(null);
+          }
+        }}
+        mode="edit"
+        initialMachine={selectedMachine}
+      />
     </div>
   );
 }

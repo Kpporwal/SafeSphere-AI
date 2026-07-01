@@ -48,10 +48,16 @@ type AddWorkerForm = {
   ppe_items: string[];
 };
 
+type AddWorkerDialogMode = 'add' | 'edit';
+
 type AddWorkerDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  mode?: AddWorkerDialogMode;
+  initialWorker?: Worker | null;
+  onSubmitted?: () => void;
 };
+
 
 function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
@@ -70,18 +76,33 @@ function toISODateFromYMD(ymd: string) {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
-const PPE_OPTIONS = [
-  'Helmet',
-  'Gloves',
-  'Safety Shoes',
-  'Safety Vest',
-  'Goggles',
-] as const;
+const PPE_OPTIONS = ['Helmet', 'Gloves', 'Safety Shoes', 'Safety Vest', 'Goggles'] as const;
 
-export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogProps) {
+export default function AddWorkerDialog({
+  open,
+  onOpenChange,
+  mode = 'add',
+  initialWorker = null,
+  onSubmitted,
+}: AddWorkerDialogProps) {
+
   const supabase = React.useMemo(() => createClient(), []);
   const queryClient = useQueryClient();
   const { toast } = useToast();
+
+  const toYMDFromISO = React.useCallback((iso: string | null | undefined) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }, []);
+
+
+
+
 
   const { data: departments, isLoading: isDepartmentsLoading } = useSupabaseQuery<Department>({
     table: 'departments',
@@ -89,6 +110,8 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
   });
 
   const [submitting, setSubmitting] = React.useState(false);
+
+
 
   const [form, setForm] = React.useState<AddWorkerForm>({
     employee_id: '',
@@ -130,6 +153,7 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
     if (!open) reset();
   }, [open, reset]);
 
+
   const validate = React.useCallback(() => {
     const nextErrors: Record<string, string> = {};
 
@@ -152,6 +176,30 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
     setErrors(nextErrors);
     return Object.keys(nextErrors).length === 0;
   }, [form]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    if (mode !== 'edit') return;
+    if (!initialWorker) return;
+
+    setForm({
+      employee_id: initialWorker.employee_id ?? '',
+      full_name: initialWorker.full_name ?? '',
+      email: initialWorker.email ?? '',
+      phone: initialWorker.phone ?? '',
+      department_id: initialWorker.department_id ?? '',
+      position: initialWorker.position ?? '',
+      shift: (initialWorker.shift as WorkerShift) ?? '',
+      status: (initialWorker.status as WorkerStatus) ?? '',
+      location: initialWorker.location ?? '',
+      safety_training_expiry: toYMDFromISO(initialWorker.safety_training_expiry),
+      ppe_items: initialWorker.ppe_items ?? [],
+    });
+    setErrors({});
+  }, [mode, open, initialWorker, toYMDFromISO]);
+
+
+
 
   const onSubmit = React.useCallback(
     async (e: React.FormEvent) => {
@@ -186,15 +234,29 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
           ppe_items: form.ppe_items,
         };
 
-        const { error } = await supabase
-          .from('workers')
-          .insert(payload)
-          .select('id')
-          .single();
+        let error: any = null;
+
+        if (mode === 'edit' && initialWorker?.id) {
+          const { error: updateError } = await supabase
+            .from('workers')
+            .update(payload)
+            .eq('id', initialWorker.id);
+          error = updateError;
+        } else {
+          const { error: insertError } = await supabase
+            .from('workers')
+            .insert(payload)
+            .select('id')
+            .single();
+          error = insertError;
+        }
 
         if (error) throw error;
 
-        toast({ title: 'Worker added successfully', description: payload.full_name });
+        toast({
+          title: mode === 'edit' ? 'Worker updated successfully' : 'Worker added successfully',
+          description: payload.full_name,
+        });
 
         // Refresh workers list
         queryClient.invalidateQueries({ queryKey: ['workers'], exact: false });
@@ -212,8 +274,19 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
         setSubmitting(false);
       }
     },
-    [form, onOpenChange, queryClient, supabase, submitting, toast, validate]
+    [
+      form,
+      mode,
+      onOpenChange,
+      queryClient,
+      supabase,
+      submitting,
+      toast,
+      validate,
+      initialWorker?.id,
+    ]
   );
+
 
   const togglePpeItem = React.useCallback((item: string, checked: boolean) => {
     setForm((f) => {
@@ -240,7 +313,9 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
               <Input
                 id="employee_id"
                 value={form.employee_id}
-                onChange={(e) => setForm((f) => ({ ...f, employee_id: e.target.value }))}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setForm((f) => ({ ...f, employee_id: e.target.value }))
+                }
                 placeholder="e.g. W-1001"
                 className={errors.employee_id ? 'border-destructive focus-visible:ring-destructive' : undefined}
               />
@@ -288,13 +363,8 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label>Department</Label>
-              <Select
-                value={form.department_id}
-                onValueChange={(v) => setForm((f) => ({ ...f, department_id: v }))}
-              >
-                <SelectTrigger
-                  className={errors.department_id ? 'border-destructive focus:ring-destructive' : undefined}
-                >
+              <Select value={form.department_id} onValueChange={(v) => setForm((f) => ({ ...f, department_id: v }))}>
+                <SelectTrigger className={errors.department_id ? 'border-destructive focus:ring-destructive' : undefined}>
                   <SelectValue placeholder={isDepartmentsLoading ? 'Loading...' : 'Select a department'} />
                 </SelectTrigger>
                 <SelectContent>
@@ -337,10 +407,7 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
 
             <div className="space-y-2">
               <Label>Status</Label>
-              <Select
-                value={form.status}
-                onValueChange={(v) => setForm((f) => ({ ...f, status: v as any }))}
-              >
+              <Select value={form.status} onValueChange={(v) => setForm((f) => ({ ...f, status: v as any }))}>
                 <SelectTrigger className={errors.status ? 'border-destructive focus:ring-destructive' : undefined}>
                   <SelectValue placeholder="Select status" />
                 </SelectTrigger>
@@ -355,7 +422,6 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
             </div>
           </div>
 
-          {/* Newly added fields (do not remove existing functionality) */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="location">Location</Label>
@@ -384,10 +450,7 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
               {PPE_OPTIONS.map((item) => {
                 const checked = form.ppe_items.includes(item);
                 return (
-                  <label
-                    key={item}
-                    className="flex items-center gap-2 rounded-md border border-border/50 px-3 py-2"
-                  >
+                  <label key={item} className="flex items-center gap-2 rounded-md border border-border/50 px-3 py-2">
                     <Checkbox
                       checked={checked}
                       onCheckedChange={(v) => togglePpeItem(item, v === true)}
@@ -404,7 +467,7 @@ export default function AddWorkerDialog({ open, onOpenChange }: AddWorkerDialogP
               Cancel
             </Button>
             <Button type="submit" disabled={submitting}>
-              {submitting ? 'Adding...' : 'Add Worker'}
+              {submitting ? (mode === 'edit' ? 'Updating...' : 'Adding...') : (mode === 'edit' ? 'Update Worker' : 'Add Worker')}
             </Button>
           </div>
         </form>
